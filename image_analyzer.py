@@ -106,6 +106,9 @@ def _get_wechat_window_id_via_compiled_tool() -> Optional[int]:
         output = result2.stdout.strip()
         if output:
             return int(output)
+        else:
+            logger.warning("编译工具未返回 WindowID，returncode=%d, stderr=%s",
+                         result2.returncode, result2.stderr)
     except Exception as e:
         logger.warning("gcc 回退获取 WeChat WindowID 失败: %s", e)
     finally:

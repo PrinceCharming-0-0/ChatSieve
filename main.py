@@ -201,6 +201,46 @@ def build_messages_text(messages: list, date_range: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 消息文本分段（避免超长输入）
+# ─────────────────────────────────────────────────────────────────────────────
+def split_messages_text(messages_text: str, max_chars: int = 32000) -> list:
+    """
+    将超长消息文本分段，优先在消息边界（日期分隔符或消息行）处切分。
+    返回分段列表，每段不超过 max_chars。
+    """
+    if len(messages_text) <= max_chars:
+        return [messages_text]
+
+    chunks = []
+    lines = messages_text.split("\n")
+    current_chunk = []
+    current_length = 0
+
+    for line in lines:
+        line_length = len(line) + 1  # +1 for newline
+
+        # 如果加上这行会超过限制
+        if current_length + line_length > max_chars:
+            if current_chunk:
+                chunks.append("\n".join(current_chunk))
+                current_chunk = []
+                current_length = 0
+
+            # 如果单行就超过限制，强制截断
+            if line_length > max_chars:
+                chunks.append(line[:max_chars])
+                continue
+
+        current_chunk.append(line)
+        current_length += line_length
+
+    if current_chunk:
+        chunks.append("\n".join(current_chunk))
+
+    return chunks if chunks else [""]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 主流程
 # ─────────────────────────────────────────────────────────────────────────────
 def run():
@@ -351,30 +391,54 @@ def run():
             if image_result_text:
                 messages_text += f"\n\n=== 图片内容分析 ===\n{image_result_text}"
 
-            # 截断超长消息（AI 输入上限保护）
-            MAX_INPUT_CHARS = 8000
-            if len(messages_text) > MAX_INPUT_CHARS:
-                messages_text = messages_text[:MAX_INPUT_CHARS] + f"\n...（共 {len(messages_text)} 字，已截断）"
-                logger.warning("群 %s 消息文本过长，已截断至 %d 字符", group_name, MAX_INPUT_CHARS)
+            # ── 步骤 E：分段处理超长消息 ─────────────────────────────────────
+            MAX_INPUT_CHARS = 32000
+            text_chunks = split_messages_text(messages_text, MAX_INPUT_CHARS)
 
-            # ── 步骤 E：AI 摘要 ───────────────────────────────────────────
+            if len(text_chunks) > 1:
+                logger.info("群 %s 消息文本过长（%d 字符），已分为 %d 段处理",
+                           group_name, len(messages_text), len(text_chunks))
+
+            # ── 步骤 F：对每段分别生成 AI 摘要 ──────────────────────────────
             logger.info("正在为群 %s 生成 AI 摘要", group_name)
-            try:
-                summary = ai_client.summarize(messages_text, date_range)
+            segment_summaries = []
 
-                # 记录 token 使用量（last_tokens 为本次调用的差值）
-                used_tokens = ai_client.last_tokens
-                tracker.add_usage(used_tokens)
-                total_tokens_used += used_tokens
-                logger.info("群 %s AI 摘要完成，使用 token: %d", group_name, used_tokens)
+            for idx, chunk in enumerate(text_chunks):
+                try:
+                    if len(text_chunks) > 1:
+                        logger.info("正在处理第 %d/%d 段", idx + 1, len(text_chunks))
 
-                # 添加群名到摘要中
-                all_summaries.append(f"### {group_name}\n{summary}")
-                groups_with_messages.append(group_name)
+                    summary = ai_client.summarize(chunk, date_range)
 
-            except AIServiceError as e:
-                logger.error("群 %s AI 摘要失败: %s", group_name, e)
+                    # 记录 token 使用量
+                    used_tokens = ai_client.last_tokens
+                    tracker.add_usage(used_tokens)
+                    total_tokens_used += used_tokens
+
+                    segment_summaries.append(summary)
+                    logger.info("第 %d/%d 段摘要完成，使用 token: %d",
+                               idx + 1, len(text_chunks), used_tokens)
+
+                except AIServiceError as e:
+                    logger.error("群 %s 第 %d/%d 段 AI 摘要失败: %s",
+                                group_name, idx + 1, len(text_chunks), e)
+                    continue
+
+            if not segment_summaries:
+                logger.error("群 %s 所有分段摘要均失败，跳过", group_name)
                 continue
+
+            # 合并多段摘要
+            if len(segment_summaries) > 1:
+                final_summary = "\n\n---\n\n".join(
+                    f"**第 {i+1} 部分**\n{s}" for i, s in enumerate(segment_summaries)
+                )
+            else:
+                final_summary = segment_summaries[0]
+
+            # 添加群名到摘要中
+            all_summaries.append(f"### {group_name}\n{final_summary}")
+            groups_with_messages.append(group_name)
 
         # ── 步骤 E：Server酱³ 推送 ──────────────────────────────────────
         if not all_summaries:

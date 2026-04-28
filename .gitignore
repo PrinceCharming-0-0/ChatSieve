@@ -1,1 +1,18 @@
 .env
+
+# macOS system files
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Runtime state files
+run_state.json
+token_state.json
+wechat_window_id.txt
+
+# Logs
+logs/
+*.log
